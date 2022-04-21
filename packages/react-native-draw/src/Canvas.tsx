@@ -1,11 +1,5 @@
-import React, {
-  forwardRef,
-  useEffect,
-  useImperativeHandle,
-  useState,
-} from 'react';
+import React, { forwardRef, useEffect, useImperativeHandle } from 'react';
 import {
-  Animated,
   Dimensions,
   StyleProp,
   StyleSheet,
@@ -17,6 +11,11 @@ import {
   GestureDetector,
   GestureHandlerRootView,
 } from 'react-native-gesture-handler';
+
+import Animated, {
+  useSharedValue,
+  useWorkletCallback,
+} from 'react-native-reanimated';
 
 import {
   DEFAULT_BRUSH_COLOR,
@@ -230,10 +229,10 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
       ...simplifyOptions,
     };
 
-    const [paths, setPaths] = useState<PathType[]>(
+    const paths = useSharedValue<PathType[]>(
       generateSVGPaths(initialPaths, simplifyOptions)
     );
-    const [path, setPath] = useState<PathDataType>([]);
+    const path = useSharedValue<PathDataType>([]);
 
     const canvasContainerStyles = [
       styles.canvas,
@@ -245,45 +244,43 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
     ];
 
     const addPointToPath = (x: number, y: number) => {
-      setPath((prev) => [
-        ...prev,
+      path.value = [
+        ...path.value,
         [
           simplifyOptions.roundPoints ? Math.floor(x) : x,
           simplifyOptions.roundPoints ? Math.floor(y) : y,
         ],
-      ]);
+      ];
     };
 
     const undo = () => {
-      setPaths((list) =>
-        list.reduce((acc: PathType[], p, index) => {
-          if (index === list.length - 1) {
-            if (p.data.length > 1) {
-              return [
-                ...acc,
-                {
-                  ...p,
-                  data: p.data.slice(0, -1),
-                  path: p.path!.slice(0, -1),
-                },
-              ];
-            }
-            return acc;
+      paths.value = paths.value.reduce((acc: PathType[], p, index) => {
+        if (index === paths.value.length - 1) {
+          if (p.data.length > 1) {
+            return [
+              ...acc,
+              {
+                ...p,
+                data: p.data.slice(0, -1),
+                path: p.path!.slice(0, -1),
+              },
+            ];
           }
-          return [...acc, p];
-        }, [])
-      );
+          return acc;
+        }
+        return [...acc, p];
+      }, []);
     };
 
     const clear = () => {
-      setPaths([]);
-      setPath([]);
+      paths.value = [];
+      path.value = [];
     };
 
-    const getPaths = () => paths;
+    const getPaths = () => paths.value;
 
     const addPath = (newPath: PathType) =>
-      setPaths((prev) => [...prev, newPath]);
+      (paths.value = [...paths.value, newPath]);
 
     const getSvg = () => {
       const serializePath = (
@@ -309,7 +306,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
       const combinedPath = (p: PathType) =>
         `${serializePath(p.path!.join(' '), p.color, p.thickness, p.opacity)}`;
 
-      const serializedPaths = paths.reduce(
+      const serializedPaths = paths.value.reduce(
         (acc, p) => `${acc}${p.combine ? combinedPath(p) : separatePaths(p)}`,
         ''
       );
@@ -325,107 +322,107 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
       getSvg,
     }));
 
-    useEffect(
-      () => onPathsChange && onPathsChange(paths),
-      [paths, onPathsChange]
-    );
+    useEffect(() => {
+      onPathsChange && onPathsChange(paths.value);
+    }, [paths, onPathsChange]);
 
-    const panGesture = Gesture.Pan()
-      .onChange(({ x, y }) => {
-        switch (tool) {
-          case DrawingTool.Brush:
-            addPointToPath(x, y);
-            break;
-          case DrawingTool.Eraser:
-            setPaths((prevPaths) =>
-              prevPaths.reduce((acc: PathType[], p) => {
-                const filteredDataPaths = p.data.reduce(
-                  (
-                    acc2: { data: PathDataType[]; path: string[] },
-                    data,
-                    index
-                  ) => {
-                    const closeToPath = data.some(
-                      ([x1, y1]) =>
-                        Math.abs(x1 - x) < p.thickness + eraserSize &&
-                        Math.abs(y1 - y) < p.thickness + eraserSize
-                    );
-
-                    // If point close to path, don't include it
-                    if (closeToPath) {
-                      return acc2;
-                    }
-
-                    return {
-                      data: [...acc2.data, data],
-                      path: [...acc2.path, p.path![index]],
-                    };
-                  },
-                  { data: [], path: [] }
+    const onChange = ({ x, y }: { x: number; y: number }) => {
+      switch (tool) {
+        case DrawingTool.Brush:
+          addPointToPath(x, y);
+          break;
+        case DrawingTool.Eraser:
+          paths.value = paths.value.reduce((acc: PathType[], p) => {
+            const filteredDataPaths = p.data.reduce(
+              (acc2: { data: PathDataType[]; path: string[] }, data, index) => {
+                const closeToPath = data.some(
+                  ([x1, y1]) =>
+                    Math.abs(x1 - x) < p.thickness + eraserSize &&
+                    Math.abs(y1 - y) < p.thickness + eraserSize
                 );
 
-                if (filteredDataPaths.data.length > 0) {
-                  return [...acc, { ...p, ...filteredDataPaths }];
+                // If point close to path, don't include it
+                if (closeToPath) {
+                  return acc2;
                 }
 
-                return acc;
-              }, [])
-            );
-            break;
-        }
-      })
-      .onBegin(({ x, y }) => {
-        if (tool === DrawingTool.Brush) {
-          addPointToPath(x, y);
-        }
-      })
-      .onEnd(() => {
-        if (tool === DrawingTool.Brush) {
-          setPaths((prev) => {
-            const newSVGPath = generateSVGPath(path, simplifyOptions);
-
-            if (prev.length === 0) {
-              return [
-                {
-                  color,
-                  path: [newSVGPath],
-                  data: [path],
-                  thickness,
-                  opacity,
-                  combine: combineWithLatestPath,
-                },
-              ];
-            }
-
-            const lastPath = prev[prev.length - 1];
-
-            // Check if the last path has the same properties
-            if (
-              lastPath.color === color &&
-              lastPath.thickness === thickness &&
-              lastPath.opacity === opacity
-            ) {
-              lastPath.path = [...lastPath.path!, newSVGPath];
-              lastPath.data = [...lastPath.data, path];
-
-              return [...prev.slice(0, -1), lastPath];
-            }
-
-            return [
-              ...prev,
-              {
-                color,
-                path: [newSVGPath],
-                data: [path],
-                thickness,
-                opacity,
-                combine: combineWithLatestPath,
+                return {
+                  data: [...acc2.data, data],
+                  path: [...acc2.path, p.path![index]],
+                };
               },
-            ];
-          });
-          setPath([]);
+              { data: [], path: [] }
+            );
+
+            if (filteredDataPaths.data.length > 0) {
+              return [...acc, { ...p, ...filteredDataPaths }];
+            }
+
+            return acc;
+          }, []);
+          break;
+      }
+    };
+
+    const onBegin = ({ x, y }: { x: number; y: number }) => {
+      if (tool === DrawingTool.Brush) {
+        addPointToPath(x, y);
+      }
+    };
+
+    const onEnd = () => {
+      if (tool === DrawingTool.Brush) {
+        const newSVGPath = generateSVGPath(path.value, simplifyOptions);
+
+        if (paths.value.length === 0) {
+          paths.value = [
+            {
+              color,
+              path: [newSVGPath],
+              data: [path.value],
+              thickness,
+              opacity,
+              combine: combineWithLatestPath,
+            },
+          ];
         }
-      })
+
+        const lastPath = paths.value[paths.value.length - 1];
+
+        // Check if the last path has the same properties
+        if (
+          lastPath?.color === color &&
+          lastPath?.thickness === thickness &&
+          lastPath?.opacity === opacity
+        ) {
+          const newLastPath = {
+            ...lastPath,
+            path: [...lastPath.path!, newSVGPath],
+            data: [...lastPath.data, path.value],
+          };
+
+          paths.value = [...paths.value.slice(0, -1), newLastPath];
+        }
+
+        paths.value = [
+          ...paths.value,
+          {
+            color,
+            path: [newSVGPath],
+            data: [path.value],
+            thickness,
+            opacity,
+            combine: combineWithLatestPath,
+          },
+        ];
+        path.value = [];
+      }
+    };
+
+    const panGesture = Gesture.Pan()
+      .onChange(useWorkletCallback(onChange))
+      .onBegin(useWorkletCallback(onBegin))
+      .onEnd(useWorkletCallback(onEnd))
       .minPointers(1)
       .minDistance(0)
       .averageTouches(false)
@@ -446,7 +443,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
               <RendererHelper
                 currentColor={color}
                 currentOpacity={opacity}
-                currentPath={path}
+                currentPath={path.value}
                 currentThickness={thickness}
                 currentPathTolerance={
                   simplifyOptions.simplifyCurrentPath
@@ -454,7 +451,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(
                     : 0
                 }
                 roundPoints={simplifyOptions.roundPoints!}
-                paths={paths}
+                paths={paths.value}
                 height={height}
                 width={width}
                 Renderer={SVGRenderer}
